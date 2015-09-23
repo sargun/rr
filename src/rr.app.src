@@ -1,0 +1,13 @@
+{application, rr,
+ [
+  {description, ""},
+  {vsn, "1"},
+  {registered, []},
+  {applications, [
+                  kernel,
+                  stdlib,
+                  ranch
+                 ]},
+  {mod, { rr_app, []}},
+  {env, []}
+ ]}.
