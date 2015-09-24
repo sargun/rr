@@ -91,7 +91,7 @@ parse(#connection{socket = Socket, transport=Transport, state=HandleState, modul
 
 answer({Socket, Transport}, Answer) ->
    % io:format("Responding with: ~p~n", [Answer]),
-    Transport:send(Socket, redis_protocol_encoder:encode(Answer)).
+    Transport:send(Socket, rr_encoder:encode(Answer)).
 
 
 get_newline_pos(B) ->
@@ -99,3 +99,4 @@ get_newline_pos(B) ->
         {match, [{Pos, _}]} -> Pos;
         nomatch -> undefined
     end.
+
