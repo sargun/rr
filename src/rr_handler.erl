@@ -1,6 +1,6 @@
 -module(rr_handler).
 
--export([handle/3, handle/2]).
+-export([handle/3]).
 -export([init/0]).
 -define(CONSISTENT_TYPE, <<"cp">>).
 -define(CONSISTENT_BUCKET, <<"bucket">>).
@@ -57,7 +57,7 @@ binary_to_number(Bin) ->
 
 
 
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"ZREM">>, Key| Keys]) ->
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"ZREM">>, Key| Keys]) ->
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
     Ensemble = riak_client:ensemble(BKey),
     Timeout = 61000,
@@ -74,21 +74,19 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
     Result = riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout),
     case Result of
         {reply, {ok, Count}} ->
-            ok = rr_protocol:answer(Connection, Count)
-    end,
-    %State1 = orddict:store(Key, {kv, Value}, State),
-    {ok, State};
+            {reply, Count, State}
+    end;
 
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"ZSCORE">>, Key, Member]) ->
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"ZSCORE">>, Key, Member]) ->
 
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
     Ensemble = riak_client:ensemble(BKey),
     Timeout = 61000,
     ModFun =
         fun (_Vsn, {z, Value}) ->
-            Ret = case lists:keymember(Member, 1, Value) of
+            Ret = case lists:keyfind(Member, 1, Value) of
                       false -> 0;
-                      Score -> Score
+                      {_, Score} -> Score
             end,
 
             {reply_noreplicate, {ok, Ret}}
@@ -97,11 +95,10 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
 
     case riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout) of
         {reply, {ok, Score}} ->
-            ok = rr_protocol:answer(Connection, float_to_binary(Score * 1.0))
-    end,
-    %State1 = orddict:store(Key, {kv, Value}, State),
-    {ok, State};
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"ZCARD">>, Key]) ->
+            io:format("Score: ~p~n", [Score]),
+            {reply, float_to_binary(Score * 1.0), State}
+    end;
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"ZCARD">>, Key]) ->
 
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
     Ensemble = riak_client:ensemble(BKey),
@@ -114,11 +111,9 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
 
     case riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout) of
         {reply, {ok, Length}} ->
-            ok = rr_protocol:answer(Connection, Length)
-    end,
-    %State1 = orddict:store(Key, {kv, Value}, State),
-    {ok, State};
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"ZRANGE">>, Key, StartBin, EndBin|MaybeWithScores])  ->
+            {reply, Length, State}
+    end;
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"ZRANGE">>, Key, StartBin, EndBin|MaybeWithScores])  ->
     Start = erlang:binary_to_integer(StartBin),
     End = erlang:binary_to_integer(EndBin),
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
@@ -143,13 +138,11 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
 
     case riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout) of
         {reply, {error, not_found}} ->
-            ok = rr_protocol:answer(Connection, {error, not_found});
+            {reply, {error, not_found}, State};
         {reply, {ok, List}} ->
-            ok = rr_protocol:answer(Connection, List)
-    end,
-    %State1 = orddict:store(Key, {kv, Value}, State),
-    {ok, State};
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"ZREVRANGE">>, Key, StartBin, EndBin|MaybeWithScores])  ->
+            {reply, List, State}
+    end;
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"ZREVRANGE">>, Key, StartBin, EndBin|MaybeWithScores])  ->
     Start = erlang:binary_to_integer(StartBin),
     End = erlang:binary_to_integer(EndBin),
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
@@ -174,13 +167,11 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
 
     case riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout) of
         {reply, {error, not_found}} ->
-            ok = rr_protocol:answer(Connection, {error, not_found});
+            {reply, {error, not_found}, State};
         {reply, {ok, List}} ->
-            ok = rr_protocol:answer(Connection, List)
-    end,
-    %State1 = orddict:store(Key, {kv, Value}, State),
-    {ok, State};
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"ZADD">>, Key|Opts]) ->
+            {reply, List, State}
+    end;
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"ZADD">>, Key|Opts]) ->
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
     Ensemble = riak_client:ensemble(BKey),
     Timeout = 61000,
@@ -204,11 +195,9 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
     Result = riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout),
     case Result of
         {reply, {ok, Count}} ->
-            ok = rr_protocol:answer(Connection, Count)
-    end,
-    %State1 = orddict:store(Key, {kv, Value}, State),
-    {ok, State};
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"LLEN">>, Key]) ->
+            {reply, Count, State}
+    end;
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"LLEN">>, Key]) ->
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
     Ensemble = riak_client:ensemble(BKey),
     Timeout = 61000,
@@ -222,11 +211,9 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
     Result = riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout),
     case Result of
         {reply, {ok, Count}} ->
-            ok = rr_protocol:answer(Connection, Count)
-    end,
-    %State1 = orddict:store(Key, {kv, Value}, State),
-    {ok, State};
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"LPUSH">>, Key|Values]) ->
+            {reply, Count, State}
+    end;
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"LPUSH">>, Key|Values]) ->
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
     Ensemble = riak_client:ensemble(BKey),
     Timeout = 61000,
@@ -240,11 +227,9 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
     Result = riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout),
     case Result of
         {reply, {ok, Count}} ->
-            ok = rr_protocol:answer(Connection, Count)
-    end,
-    %State1 = orddict:store(Key, {kv, Value}, State),
-    {ok, State};
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"LTRIM">>, Key, StartBin, EndBin]) ->
+            {reply, Count, State}
+    end;
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"LTRIM">>, Key, StartBin, EndBin]) ->
     Start = erlang:binary_to_integer(StartBin),
     End = erlang:binary_to_integer(EndBin),
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
@@ -261,10 +246,8 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
         end,
     Default = {list, []},
     _ = riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout),
-    ok = rr_protocol:answer(Connection, ok),
-    %State1 = orddict:store(Key, {kv, Value}, State),
-    {ok, State};
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"LRANGE">>, Key, StartBin, EndBin]) ->
+    {reply, ok, State};
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"LRANGE">>, Key, StartBin, EndBin]) ->
     Start = erlang:binary_to_integer(StartBin),
     End = erlang:binary_to_integer(EndBin),
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
@@ -282,14 +265,11 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
 
     case riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout) of
         {reply, {error, not_found}} ->
-            ok = rr_protocol:answer(Connection, {error, not_found});
+            {reply, {error, not_found}, State};
         {reply, {ok, List}} ->
-            ok = rr_protocol:answer(Connection, List)
-    end,
-    _ = riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout),
-    %State1 = orddict:store(Key, {kv, Value}, State),
-    {ok, State};
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"SET">>, Key, Value]) ->
+            {reply, List, State}
+    end;
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"SET">>, Key, Value]) ->
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
     Ensemble = riak_client:ensemble(BKey),
     Timeout = 61000,
@@ -301,44 +281,39 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
         end,
     Default = {kv, not_found},
     Result = riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout),
-    io:format("Result: ~p~n", [Result]),
     %State1 = orddict:store(Key, {kv, Value}, State),
 
-    ok = rr_protocol:answer(Connection, ok),
-    {ok, State};
+    {reply, ok, State};
 
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"DEL">>, Key]) ->
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"DEL">>, Key]) ->
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
     Ensemble = riak_client:ensemble(BKey),
     Timeout = 61000,
     _Result = riak_ensemble_peer:kdelete(Node, Ensemble, BKey, Timeout),
     %State1 = orddict:store(Key, {kv, Value}, State),
 
-    ok = rr_protocol:answer(Connection, 1),
-    {ok, State};
+    {reply, 1, State};
 
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"GET">>, Key]) ->
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"GET">>, Key]) ->
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
     Ensemble = riak_client:ensemble(BKey),
     Timeout = 61000,
     ModFun =
         fun(_Vsn, Value) ->
-            io:format("Getting value: ~p~n", [Value]),
             {reply_noreplicate, Value}
         end,
     Default = {error, not_found},
 
     case riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout) of
         {reply, {error, not_found}} ->
-            ok = rr_protocol:answer(Connection, {error, not_found});
+            {reply, {error, not_found}, State};
         {reply, {kv, RealValue}} ->
-            ok = rr_protocol:answer(Connection, RealValue);
+            {reply, RealValue, State};
         {reply, {counter, RealValue}} ->
-            ok = rr_protocol:answer(Connection, erlang:integer_to_binary(RealValue))
-    end,
-    {ok, State};
+            {reply, erlang:integer_to_binary(RealValue), State}
+    end;
 
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"HSET">>, HashName, Key, Value]) ->
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"HSET">>, HashName, Key, Value]) ->
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, HashName},
     Ensemble = riak_client:ensemble(BKey),
     Timeout = 61000,
@@ -356,12 +331,9 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
         end,
     Default = {hash, orddict:new()},
     {reply, Count} = riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout),
+    {reply, Count, State};
 
-    ok = rr_protocol:answer(Connection, Count),
-    {ok, State};
-
-
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"HDEL">>, HashName | Keys]) ->
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"HDEL">>, HashName | Keys]) ->
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, HashName},
     Ensemble = riak_client:ensemble(BKey),
     Timeout = 61000,
@@ -381,12 +353,9 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
     Default = {hash, orddict:new()},
     {reply, Count} = riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout),
 
-    ok = rr_protocol:answer(Connection, Count),
-    {ok, State};
+    {reply, Count, State};
 
-
-
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"HGETALL">>, HashName]) ->
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"HGETALL">>, HashName]) ->
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, HashName},
     Ensemble = riak_client:ensemble(BKey),
     Timeout = 61000,
@@ -401,11 +370,10 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
     case riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout) of
         {reply, {ok, HashValue}} ->
             LoL = [[Key, Value] || {Key, Value} <- orddict:to_list(HashValue)],
-            ok = rr_protocol:answer(Connection, lists:merge(LoL))
-    end,
-    {ok, State};
+            {reply, lists:merge(LoL), State}
+    end;
 
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"HGET">>, HashName, Key]) ->
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"HGET">>, HashName, Key]) ->
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, HashName},
     Ensemble = riak_client:ensemble(BKey),
     Timeout = 61000,
@@ -424,13 +392,12 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
     Default = {hash, orddict:new()},
     case riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout) of
         {reply, {ok, Value}} ->
-            ok = rr_protocol:answer(Connection, Value);
+            {reply, Value, State};
         {reply, {error, not_found}} ->
-            ok = rr_protocol:answer(Connection, {error, not_found})
-    end,
-    {ok, State};
+            {reply, {error, not_found}, State}
+    end;
 
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"HSETNX">>, HashName, Key, Value]) ->
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"HSETNX">>, HashName, Key, Value]) ->
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, HashName},
     Ensemble = riak_client:ensemble(BKey),
     Timeout = 61000,
@@ -449,15 +416,12 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
     Result = riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout),
     case Result of
         {reply, {error, value_existed}} ->
-            ok = rr_protocol:answer(Connection, 0);
+            {reply, 0, State};
         {reply, Count} ->
-            ok = rr_protocol:answer(Connection, Count)
-    end,
-    {ok, State};
+            {reply, Count, State}
+    end;
 
-
-
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"HMSET">>, HashName | KeyValues]) ->
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"HMSET">>, HashName | KeyValues]) ->
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, HashName},
     Ensemble = riak_client:ensemble(BKey),
     Timeout = 61000,
@@ -475,18 +439,17 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
         end,
     Default = {hash, orddict:new()},
     {reply, Reply} = riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout),
-    ok = rr_protocol:answer(Connection, Reply),
-    {ok, State};
-handle(Connection, State, [<<"DECR">>, Key]) ->
-    handle(Connection, State, [<<"INCRBY">>, Key, -1]);
-handle(Connection, State, [<<"INCR">>, Key]) ->
-    handle(Connection, State, [<<"INCRBY">>, Key, 1]);
-handle(Connection, State, [<<"INCRBY">>, Key, AmountStr]) when is_binary(AmountStr) ->
-    handle(Connection, State, [<<"INCRBY">>, Key, erlang:binary_to_integer(AmountStr)]);
-handle(Connection, State, [<<"DECRBY">>, Key, AmountStr]) when is_binary(AmountStr) ->
-    handle(Connection, State, [<<"INCRBY">>, Key, -1 * erlang:binary_to_integer(AmountStr)]);
+    {reply, Reply, State};
+handle(_Connection, State, [<<"DECR">>, Key]) ->
+    handle(_Connection, State, [<<"INCRBY">>, Key, -1]);
+handle(_Connection, State, [<<"INCR">>, Key]) ->
+    handle(_Connection, State, [<<"INCRBY">>, Key, 1]);
+handle(_Connection, State, [<<"INCRBY">>, Key, AmountStr]) when is_binary(AmountStr) ->
+    handle(_Connection, State, [<<"INCRBY">>, Key, erlang:binary_to_integer(AmountStr)]);
+handle(_Connection, State, [<<"DECRBY">>, Key, AmountStr]) when is_binary(AmountStr) ->
+    handle(_Connection, State, [<<"INCRBY">>, Key, -1 * erlang:binary_to_integer(AmountStr)]);
 
-handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"INCRBY">>, Key, Amount]) when is_integer(Amount) ->
+handle(_Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"INCRBY">>, Key, Amount]) when is_integer(Amount) ->
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
     Ensemble = riak_client:ensemble(BKey),
     Timeout = 61000,
@@ -501,23 +464,14 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
     case Result of
         {ok, RObj} ->
             {counter, NewAmount} = riak_object:get_value(RObj),
-            ok = rr_protocol:answer(Connection, NewAmount)
-    end,
-    {ok, State};
+            {reply, NewAmount, State}
+    end;
 
-handle(Connection, State, [<<"PING">>]) ->
-    ok = rr_protocol:answer(Connection, <<"PONG">>),
-    {ok, State};
-handle(Connection, State, Action) ->
+handle(_Connection, State, [<<"PING">>]) ->
+    {reply, <<"PONG">>, State};
+handle(_Connection, State, Action) ->
     io:format("Unknown Action: ~p~n", [Action]),
-    ok = rr_protocol:answer(Connection, ok),
-    {ok, State}.
-
-handle(State, [<<"PING">>]) ->
-    {ok, State, <<"PONG">>};
-handle(State, Action) ->
-    io:format("Handling data: ~p~n", [Action]),
-    {ok, State, ok}.
+    {reply, ok, State}.
 
 init() ->
     {ok, Client} = riak:local_client(),

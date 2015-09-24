@@ -13,7 +13,7 @@
 
 -record(state, {handler}).
 -export([start_link/4]).
--export([init/4, answer/2]).
+-export([init/4]).
 -include_lib("eredis/include/eredis.hrl").
 
 
@@ -58,12 +58,14 @@ read_line(#connection{socket=Socket, transport=Transport, options=Options} = Con
 parse(#connection{socket = Socket, transport=Transport, state=HandleState, module=Mod} = Connection, State, Data) ->
     case eredis_parser:parse(State, Data) of
         {ok, Return, NewParserState} ->
-            io:format("Handling: ~p~n", [Return]),
-            {ok, ConnectionState} = Mod:handle({Socket, Transport}, HandleState, Return),
+            %io:format("Handling: ~p~n", [Return]),
+            {reply, Reply, ConnectionState} = Mod:handle({Socket, Transport}, HandleState, Return),
+            ok = answer({Socket, Transport}, Reply),
             {ok, ConnectionState, NewParserState};
         {ok, Return, Rest, NewParserState} ->
-            io:format("Handling: ~p~n", [Return]),
-            {ok, ConnectionState} = Mod:handle({Socket, Transport}, HandleState, Return),
+            %io:format("Handling: ~p~n", [Return]),
+            {reply, Reply, ConnectionState} = Mod:handle({Socket, Transport}, HandleState, Return),
+            ok = answer({Socket, Transport}, Reply),
             parse(Connection#connection{state=ConnectionState}, NewParserState, Rest);
         {continue, NewParserState} ->
             {continue, NewParserState};
@@ -73,7 +75,8 @@ parse(#connection{socket = Socket, transport=Transport, state=HandleState, modul
                     {continue, State};
                 Pos ->
                     <<Value:Pos/binary, ?NL, Rest/binary>> = Data,
-                    {ok, ConnectionState} = Mod:handle({Socket, Transport}, HandleState, binary:split(Value, <<$ >>, [global])),
+                    {reply, Reply, ConnectionState} = Mod:handle({Socket, Transport}, HandleState, binary:split(Value, <<$ >>, [global])),
+                    ok = answer({Socket, Transport}, Reply),
                     case Rest of
                         <<>> ->
                             {ok, ConnectionState, State};
@@ -87,7 +90,7 @@ parse(#connection{socket = Socket, transport=Transport, state=HandleState, modul
     end.
 
 answer({Socket, Transport}, Answer) ->
-    io:format("Responding with: ~p~n", [Answer]),
+   % io:format("Responding with: ~p~n", [Answer]),
     Transport:send(Socket, redis_protocol_encoder:encode(Answer)).
 
 
