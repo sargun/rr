@@ -45,12 +45,9 @@ init(Ref, Socket, Transport, _InitState = #state{handler = Mod}) ->
 
 read_line(#connection{socket=Socket, transport=Transport, options=Options} = Connection, Parser, Rest) ->
     ok = Transport:setopts(Socket, [binary, {active, once}]),
-    Timeout = proplists:get_value(timeout, Options, 30000),
     Line = receive {tcp, Socket, ILine} ->
         ILine
-           after Timeout ->
-               exit(timeout)
-           end,
+    end,
     case parse(Connection, Parser, <<Rest/binary, Line/binary>>) of
         {ok, ConnectionState, NewState} ->
             read_line(Connection#connection{state=ConnectionState}, NewState, <<>>);
@@ -61,9 +58,11 @@ read_line(#connection{socket=Socket, transport=Transport, options=Options} = Con
 parse(#connection{socket = Socket, transport=Transport, state=HandleState, module=Mod} = Connection, State, Data) ->
     case eredis_parser:parse(State, Data) of
         {ok, Return, NewParserState} ->
+            io:format("Handling: ~p~n", [Return]),
             {ok, ConnectionState} = Mod:handle({Socket, Transport}, HandleState, Return),
             {ok, ConnectionState, NewParserState};
         {ok, Return, Rest, NewParserState} ->
+            io:format("Handling: ~p~n", [Return]),
             {ok, ConnectionState} = Mod:handle({Socket, Transport}, HandleState, Return),
             parse(Connection#connection{state=ConnectionState}, NewParserState, Rest);
         {continue, NewParserState} ->
@@ -88,6 +87,7 @@ parse(#connection{socket = Socket, transport=Transport, state=HandleState, modul
     end.
 
 answer({Socket, Transport}, Answer) ->
+    io:format("Responding with: ~p~n", [Answer]),
     Transport:send(Socket, redis_protocol_encoder:encode(Answer)).
 
 

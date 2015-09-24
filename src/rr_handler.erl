@@ -11,6 +11,203 @@
 
 
 
+%% Super inefficient. Optimize, please.
+get_range_fun(Start, End) when is_integer(Start) andalso is_integer(End) ->
+    fun(List) ->
+        Len = length(List),
+        Slices =
+            fun({Idx, Elem}) when Start >= 0 andalso End >= 0 andalso Idx >= Start andalso End >= Idx ->
+                {true, Elem};
+                ({Idx, Elem}) when 0 > Start andalso End >= 0 andalso Idx >= (Len + Start)  andalso End >= Idx ->
+                    {true, Elem};
+                ({Idx, Elem}) when Start >= 0 andalso 0 > End andalso Idx >= Start andalso  (End + Len) >= Idx ->
+                    {true, Elem};
+                ({Idx, Elem}) when 0 > Start andalso 0 > End andalso Idx >= (Len + Start) andalso (End + Len) >= Idx ->
+                    {true, Elem};
+                ({_Idx, _Elem}) ->
+                    false
+            end,
+        IdxList = lists:zip(lists:seq(0, Len - 1), List),
+        lists:filtermap(Slices, IdxList)
+    end.
+
+parse_zadd1([<<"NX">>|Cmd]) ->
+    parse_zadd2(Cmd, [only_add]);
+parse_zadd1([<<"XX">>|Cmd]) ->
+    parse_zadd2(Cmd, [only_update]);
+parse_zadd1(Cmd) ->
+    parse_zadd2(Cmd, []).
+parse_zadd2([<<"CH">>| Cmd], Opts) ->
+    parse_zadd3(Cmd, [changed|Opts]);
+parse_zadd2(Cmd, Opts) ->
+    parse_zadd3(Cmd, Opts).
+parse_zadd3([<<"INCR">> | Cmd], Opts) ->
+    {Cmd, [increment|Opts]};
+parse_zadd3(Cmd, Opts) ->
+    {Cmd, Opts}.
+
+binary_to_number(Bin) ->
+    try binary_to_float(Bin) of
+        Val -> Val
+    catch
+        _:_ ->
+            binary_to_integer(Bin)
+    end.
+
+
+
+
+handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"ZREM">>, Key| Keys]) ->
+    BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
+    Ensemble = riak_client:ensemble(BKey),
+    Timeout = 61000,
+    ModFun =
+        fun(_Vsn, {z, List}) ->
+            %KeyScoresToUpdate = [{NewKey, NewScore} || {NewKey, NewScore} <- MemberScores, {OldKey, _} <- List, NewKey == OldKey],
+            NewUnsortedList = lists:foldl(fun(KeyToDelete, Acc) -> lists:keydelete(KeyToDelete, 1, Acc) end, List, Keys),
+            SortedList = lists:keysort(2, NewUnsortedList),
+            {reply, {ok, length(List) - length(NewUnsortedList)}, {z, SortedList}};
+            (_Vsn, _Value) ->
+                {reply_noreplicate, {error, wrong_datatype}}
+        end,
+    Default = {z, []},
+    Result = riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout),
+    case Result of
+        {reply, {ok, Count}} ->
+            ok = rr_protocol:answer(Connection, Count)
+    end,
+    %State1 = orddict:store(Key, {kv, Value}, State),
+    {ok, State};
+
+handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"ZSCORE">>, Key, Member]) ->
+
+    BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
+    Ensemble = riak_client:ensemble(BKey),
+    Timeout = 61000,
+    ModFun =
+        fun (_Vsn, {z, Value}) ->
+            Ret = case lists:keymember(Member, 1, Value) of
+                      false -> 0;
+                      Score -> Score
+            end,
+
+            {reply_noreplicate, {ok, Ret}}
+        end,
+    Default = {z, []},
+
+    case riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout) of
+        {reply, {ok, Score}} ->
+            ok = rr_protocol:answer(Connection, float_to_binary(Score * 1.0))
+    end,
+    %State1 = orddict:store(Key, {kv, Value}, State),
+    {ok, State};
+handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"ZCARD">>, Key]) ->
+
+    BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
+    Ensemble = riak_client:ensemble(BKey),
+    Timeout = 61000,
+    ModFun =
+        fun (_Vsn, {z, Value}) ->
+            {reply_noreplicate, {ok, length(Value)}}
+        end,
+    Default = {z, []},
+
+    case riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout) of
+        {reply, {ok, Length}} ->
+            ok = rr_protocol:answer(Connection, Length)
+    end,
+    %State1 = orddict:store(Key, {kv, Value}, State),
+    {ok, State};
+handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"ZRANGE">>, Key, StartBin, EndBin|MaybeWithScores])  ->
+    Start = erlang:binary_to_integer(StartBin),
+    End = erlang:binary_to_integer(EndBin),
+    BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
+    Ensemble = riak_client:ensemble(BKey),
+    Timeout = 61000,
+
+    RangeFun = get_range_fun(Start, End),
+    ModFun =
+        fun (_Vsn, {z, Value}) ->
+            Range = RangeFun(Value),
+            Result = case MaybeWithScores of
+                [] ->
+                    [Member || {Member, _Score} <- Range];
+                [<<"WITHSCORES">>] ->
+                    lists:merge([[Member, float_to_binary(Score * 1.0)] || {Member, Score} <- Range])
+            end,
+            {reply_noreplicate, {ok, Result}};
+            (_Vsn, {error, not_found}) ->
+                {reply_noreplicate, {error, not_found}}
+        end,
+    Default = {error, not_found},
+
+    case riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout) of
+        {reply, {error, not_found}} ->
+            ok = rr_protocol:answer(Connection, {error, not_found});
+        {reply, {ok, List}} ->
+            ok = rr_protocol:answer(Connection, List)
+    end,
+    %State1 = orddict:store(Key, {kv, Value}, State),
+    {ok, State};
+handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"ZREVRANGE">>, Key, StartBin, EndBin|MaybeWithScores])  ->
+    Start = erlang:binary_to_integer(StartBin),
+    End = erlang:binary_to_integer(EndBin),
+    BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
+    Ensemble = riak_client:ensemble(BKey),
+    Timeout = 61000,
+
+    RangeFun = get_range_fun(Start, End),
+    ModFun =
+        fun (_Vsn, {z, Value}) ->
+            Range = RangeFun(lists:reverse(Value)),
+            Result = case MaybeWithScores of
+                         [] ->
+                             [Member || {Member, _Score} <- Range];
+                         [<<"WITHSCORES">>] ->
+                             lists:merge([[Member, float_to_binary(Score * 1.0)] || {Member, Score} <- Range])
+                     end,
+            {reply_noreplicate, {ok, Result}};
+            (_Vsn, {error, not_found}) ->
+                {reply_noreplicate, {error, not_found}}
+        end,
+    Default = {error, not_found},
+
+    case riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout) of
+        {reply, {error, not_found}} ->
+            ok = rr_protocol:answer(Connection, {error, not_found});
+        {reply, {ok, List}} ->
+            ok = rr_protocol:answer(Connection, List)
+    end,
+    %State1 = orddict:store(Key, {kv, Value}, State),
+    {ok, State};
+handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"ZADD">>, Key|Opts]) ->
+    BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
+    Ensemble = riak_client:ensemble(BKey),
+    Timeout = 61000,
+    {MemberScoresBin, []} = parse_zadd1(Opts),
+    IDXs = lists:zip(lists:seq(1, erlang:length(MemberScoresBin)), MemberScoresBin),
+    {ScoresIDX, MemberIDX} = lists:partition(fun({X, _}) -> X rem 2 == 1 end, IDXs),
+    Members = [Member || {_, Member} <- MemberIDX],
+    Scores = [binary_to_number(Value)|| {_, Value} <- ScoresIDX],
+    %  lists:keysort(1,
+    MemberScores = lists:zip(Members, Scores) ,
+    ModFun =
+        fun(_Vsn, {z, List}) ->
+            %KeyScoresToUpdate = [{NewKey, NewScore} || {NewKey, NewScore} <- MemberScores, {OldKey, _} <- List, NewKey == OldKey],
+            NewUnsortedList = lists:foldl(fun({Member, Score}, Acc) -> lists:keystore(Member, 1, Acc, {Member, Score}) end, List, MemberScores),
+            SortedList = lists:keysort(2, NewUnsortedList),
+            {reply, {ok, length(NewUnsortedList) - length(List)}, {z, SortedList}};
+            (_Vsn, _Value) ->
+                {reply_noreplicate, {error, wrong_datatype}}
+        end,
+    Default = {z, []},
+    Result = riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout),
+    case Result of
+        {reply, {ok, Count}} ->
+            ok = rr_protocol:answer(Connection, Count)
+    end,
+    %State1 = orddict:store(Key, {kv, Value}, State),
+    {ok, State};
 handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"LLEN">>, Key]) ->
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
     Ensemble = riak_client:ensemble(BKey),
@@ -53,25 +250,11 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
     BKey = {{?CONSISTENT_TYPE, ?CONSISTENT_BUCKET}, Key},
     Ensemble = riak_client:ensemble(BKey),
     Timeout = 61000,
-
+    RangeFun = get_range_fun(Start, End),
 
     ModFun =
         fun(_Vsn, {list, OldList}) ->
-            Len = length(OldList),
-            Slices =
-                fun({Idx, Elem}) when Start >= 0 andalso End >= 0 andalso Idx >= Start andalso End >= Idx ->
-                        {true, Elem};
-                    ({Idx, Elem}) when 0 > Start andalso End >= 0 andalso Idx >= (Len + Start)  andalso End >= Idx ->
-                        {true, Elem};
-                    ({Idx, Elem}) when Start >= 0 andalso 0 > End andalso Idx >= Start andalso  (End + Len) >= Idx ->
-                        {true, Elem};
-                    ({Idx, Elem}) when 0 > Start andalso 0 > End andalso Idx >= (Len + Start) andalso (End + Len) >= Idx ->
-                        {true, Elem};
-                    ({_Idx, _Elem}) ->
-                        false
-                end,
-            IdxList = lists:zip(lists:seq(0, Len - 1), OldList),
-            NewList = lists:filtermap(Slices, IdxList),
+            NewList = RangeFun(OldList),
             {reply, {ok, ok}, {list, NewList}};
             (_Vsn, _Value) ->
                 {reply_noreplicate, {error, wrong_datatype}}
@@ -88,35 +271,22 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
     Ensemble = riak_client:ensemble(BKey),
     Timeout = 61000,
 
+    RangeFun = get_range_fun(Start, End),
     ModFun =
-        fun(_Vsn, Value) ->
-            {reply_noreplicate, Value}
+        fun(_Vsn, {list, Value}) ->
+            {reply_noreplicate, {ok, RangeFun(Value)}};
+            (_Vsn, {error, not_found}) ->
+                {reply_noreplicate, {error, not_found}}
         end,
     Default = {error, not_found},
 
     case riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout) of
         {reply, {error, not_found}} ->
             ok = rr_protocol:answer(Connection, {error, not_found});
-        {reply, {list, List}} ->
-            Len = length(List),
-            Slices =
-                fun({Idx, Elem}) when Start >= 0 andalso End >= 0 andalso Idx >= Start andalso End >= Idx ->
-                    {true, Elem};
-                    ({Idx, Elem}) when 0 > Start andalso End >= 0 andalso Idx >= (Len + Start)  andalso End >= Idx ->
-                        {true, Elem};
-                    ({Idx, Elem}) when Start >= 0 andalso 0 > End andalso Idx >= Start andalso  (End + Len) >= Idx ->
-                        {true, Elem};
-                    ({Idx, Elem}) when 0 > Start andalso 0 > End andalso Idx >= (Len + Start) andalso (End + Len) >= Idx ->
-                        {true, Elem};
-                    ({_Idx, _Elem}) ->
-                        false
-                end,
-            IdxList = lists:zip(lists:seq(0, Len - 1), List),
-            NewList = lists:filtermap(Slices, IdxList),
-            ok = rr_protocol:answer(Connection, NewList)
+        {reply, {ok, List}} ->
+            ok = rr_protocol:answer(Connection, List)
     end,
     _ = riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout),
-    ok = rr_protocol:answer(Connection, ok),
     %State1 = orddict:store(Key, {kv, Value}, State),
     {ok, State};
 handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [<<"SET">>, Key, Value]) ->
@@ -266,7 +436,6 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
     Timeout = 61000,
     ModFun =
         fun(_Vsn, {hash, Hash}) ->
-            io:format("Hash: ~p~n", [Hash]),
             case orddict:find(Key, Hash) of
                 {ok, _OldValue} ->
                     {reply_noreplicate, {error, value_existed}};
@@ -278,7 +447,6 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
         end,
     Default = {hash, orddict:new()},
     Result = riak_ensemble_peer:kmodify(Node, Ensemble, BKey, ModFun, Default, Timeout),
-    io:format("Result: ~p~n", [Result]),
     case Result of
         {reply, {error, value_existed}} ->
             ok = rr_protocol:answer(Connection, 0);
@@ -300,8 +468,8 @@ handle(Connection, State = #state{riak_client = {_Module, [Node, _ClientId]}}, [
     NewHash = lists:keysort(1, lists:zip(Keys, Values)),
     ModFun =
         fun(_Vsn, {hash, Hash}) ->
-                NewHash2 = lists:keymerge(1, NewHash, Hash),
-                {reply, ok, {hash, NewHash2}};
+            NewHash2 = orddict:merge(fun(_Key, NewValue, _OldValue) -> NewValue end, NewHash, Hash),
+             {reply, ok, {hash, NewHash2}};
             (_Vsn, _Value) ->
                 {reply_noreplicate, {error, wrong_datatype}}
         end,
